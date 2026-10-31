@@ -123,7 +123,7 @@ export default async function handler(req, res) {
 
     res.statusCode = r.status;
     // fetch 自动解压 gzip/br，content-length 是压缩前长度，与解压后内容不匹配 → 必须丢弃
-    for (const h of ['content-type', 'cache-control', 'etag', 'last-modified']) {
+    for (const h of ['content-type', 'cache-control', 'etag', 'last-modified', 'content-disposition']) {
       const v = r.headers.get(h); if (v) res.setHeader(h, v);
     }
     res.removeHeader('content-length');
@@ -170,6 +170,10 @@ export default async function handler(req, res) {
         'window.fetch=function(i,o){try{if(typeof i==="string")i=fix(i);else if(i&&i.url)i=new Request(fix(i.url),i)}catch(e){}return of.call(window,i,o)};' +
         'var oo=XMLHttpRequest.prototype.open;' +
         'XMLHttpRequest.prototype.open=function(){try{if(typeof arguments[1]==="string")arguments[1]=fix(arguments[1])}catch(e){}return oo.apply(this,arguments)};' +
+        // MutationObserver：JS 动态插入的 a/link/img/script/iframe 节点也改写（如移动端导航按钮）
+        'function fixEl(el){try{var a=el.tagName==="A"||el.tagName==="LINK"?"href":"src";var v=el.getAttribute&&el.getAttribute(a);if(v){var f=fix(v);if(f!==v)el.setAttribute(a,f)}}catch(e){}}' +
+        'var SEL="a[href],link[href],img[src],script[src],iframe[src],source[src],video[src],audio[src]";' +
+        'if(window.MutationObserver){new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var ns=ms[i].addedNodes||[];for(var j=0;j<ns.length;j++){var n=ns[j];if(n.nodeType!==1)continue;if(n.matches&&n.matches(SEL))fixEl(n);if(n.querySelectorAll)n.querySelectorAll(SEL).forEach(fixEl)}}}).observe(document.documentElement||document,{childList:true,subtree:true})}' +
         '})();<\/script>';
       const head = hook + `<base href="${baseHref}">`;
       html = /<head[^>]*>/i.test(html)
