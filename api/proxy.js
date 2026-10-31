@@ -17,17 +17,43 @@
 //   PROXY_ALLOW  可选白名单域名，逗号分隔；设置后仅放行这些域（覆盖黑名单）
 
 import { Readable } from 'node:stream';
+import { get as edgeGet } from '@vercel/edge-config';
 
 const DEFAULT_TOKEN = 'chengxidaxia';
 const DEFAULT_DENY = '';   // 默认空黑名单
 const DEFAULT_ALLOW = '';  // 默认空 = 走黑名单模式
 
+// 运行时动态配置（Vercel Edge Config，面板 JSON 编辑器直接改，秒级生效无需部署）
+// Edge Config 内容：{ "token": "...", "deny": ["a.com","b.com"], "allow": [] }
+// 未创建 / 读取失败 / 字段缺失 → 回退 env → 回退默认值
+let _cfg = { t: 0, token: null, deny: null, allow: null };
+async function loadEdgeConfig() {
+  if (!process.env.EDGE_CONFIG) return _cfg;
+  const now = Date.now();
+  if (now - _cfg.t < 10000) return _cfg;          // 10s 内存缓存（面板改完最多 10s 生效）
+  try {
+    const [token, deny, allow] = await Promise.all([
+      edgeGet('token'), edgeGet('deny'), edgeGet('allow'),
+    ]);
+    _cfg = {
+      t: now,
+      token: typeof token === 'string' && token ? token : _cfg.token,
+      deny: Array.isArray(deny) ? deny.map(String) : _cfg.deny,
+      allow: Array.isArray(allow) ? allow.map(String) : _cfg.allow,
+    };
+  } catch { _cfg.t = now; }                        // 读失败沿用缓存值
+  return _cfg;
+}
+
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari/537.36';
 
 export default async function handler(req, res) {
-  const token = process.env.PROXY_TOKEN || DEFAULT_TOKEN;
-  const deny = (process.env.PROXY_DENY || DEFAULT_DENY).split(',').map(s => s.trim()).filter(Boolean);
-  const allow = (process.env.PROXY_ALLOW || DEFAULT_ALLOW).split(',').map(s => s.trim()).filter(Boolean);
+  const ec = await loadEdgeConfig();
+  const token = (ec && ec.token) || process.env.PROXY_TOKEN || DEFAULT_TOKEN;
+  const deny = (ec && ec.deny) ||
+    (process.env.PROXY_DENY || DEFAULT_DENY).split(',').map(s => s.trim()).filter(Boolean);
+  const allow = (ec && ec.allow) ||
+    (process.env.PROXY_ALLOW || DEFAULT_ALLOW).split(',').map(s => s.trim()).filter(Boolean);
 
   // Vercel 把 /proxy/xxx 映射到本函数：path 参数在 query 里（rewrite 见 vercel.json）
   const rawPath = req.query.path || '';

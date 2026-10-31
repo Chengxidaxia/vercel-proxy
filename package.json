@@ -1,0 +1,9 @@
+{
+  "name": "vercel-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vercel/edge-config": "^1.3.3"
+  }
+}
