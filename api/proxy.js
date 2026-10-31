@@ -127,9 +127,25 @@ export default async function handler(req, res) {
         .replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi,
           (m, o, css, c) => o + rewriteCss(css) + c);
       const baseHref = PREFIX + pageUrl + (target.includes('/') ? '' : '/');
+      // 运行时钩子：SPA（如 Discord）用 JS 动态 fetch/XHR 请求根相对路径（/assets/xxx），
+      // <base> 管不了根相对（会打到代理域的根）→ 覆写 fetch/XHR 把它们重写进代理
+      const hook = '<script>(function(){var P=' + JSON.stringify(PREFIX) + ',H=' + JSON.stringify(host) +
+        ';function fix(u){try{if(typeof u!=="string"||!u)return u;' +
+        'if(u.indexOf(P)===0)return u;' +
+        'if(/^(data|blob|javascript|mailto|about|tel|ws|wss):/i.test(u))return u;' +
+        'if(/^https?:\\/\\//i.test(u))return P+u;' +
+        'if(/^\\/\\//.test(u))return P+"https:"+u;' +
+        'if(/^\\/[^\\/]/.test(u))return P+"https://"+H+u;' +
+        'return u}catch(e){return u}}' +
+        'var of=window.fetch;' +
+        'window.fetch=function(i,o){try{if(typeof i==="string")i=fix(i);else if(i&&i.url)i=new Request(fix(i.url),i)}catch(e){}return of.call(window,i,o)};' +
+        'var oo=XMLHttpRequest.prototype.open;' +
+        'XMLHttpRequest.prototype.open=function(){try{if(typeof arguments[1]==="string")arguments[1]=fix(arguments[1])}catch(e){}return oo.apply(this,arguments)};' +
+        '})();<\/script>';
+      const head = hook + `<base href="${baseHref}">`;
       html = /<head[^>]*>/i.test(html)
-        ? html.replace(/<head[^>]*>/i, m => m + `<base href="${baseHref}">`)
-        : `<base href="${baseHref}">` + html;
+        ? html.replace(/<head[^>]*>/i, m => m + head)
+        : head + html;
       return res.end(html);
     }
 
