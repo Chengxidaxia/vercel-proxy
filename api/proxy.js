@@ -125,7 +125,9 @@ export default async function handler(req, res) {
         .replace(/(\ssrcset\s*=\s*)(["'])([^"']+)\2/gi,
           (m, a, q, v) => a + q + rewriteSrcset(v) + q)
         .replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi,
-          (m, o, css, c) => o + rewriteCss(css) + c);
+          (m, o, css, c) => o + rewriteCss(css) + c)
+        // SRI 校验：资源内容经改写后 hash 必不匹配，浏览器会拒载 → 必须移除
+        .replace(/\sintegrity\s*=\s*(["'])[^"']*\1/gi, '');
       const baseHref = PREFIX + pageUrl + (target.includes('/') ? '' : '/');
       // 运行时钩子：SPA（如 Discord）用 JS 动态 fetch/XHR 请求根相对路径（/assets/xxx），
       // <base> 管不了根相对（会打到代理域的根）→ 覆写 fetch/XHR 把它们重写进代理
