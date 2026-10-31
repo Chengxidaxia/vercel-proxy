@@ -5,7 +5,7 @@
 // 白名单管理：环境变量 PROXY_ALLOW（逗号分隔），未设置时用下方默认值。
 // 可选环境变量 PROXY_TOKEN：设置后请求需带 ?token= 或 Authorization: Bearer <token>。
 
-const DEFAULT_ALLOW = 'api.blacknet.cc.cd,img.blacknet.cc.cd,oauth.blacknet.cc.cd,api.github.com,raw.githubusercontent.com,cdn.jsdelivr.net,registry.npmmirror.com';
+const DEFAULT_ALLOW = 'api.blacknet.cc.cd,img.blacknet.cc.cd,oauth.blacknet.cc.cd,upload.blacknet.cc.cd,api.github.com,raw.githubusercontent.com,cdn.jsdelivr.net,registry.npmmirror.com';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari/537.36';
 
