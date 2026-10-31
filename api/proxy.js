@@ -35,8 +35,9 @@ export default async function handler(req, res) {
   if (provided !== token) return res.status(401).send('invalid token');
 
   let target = segs.join('/');
-  target = target.replace(/^\/+/, '');           // 去前导斜杠
-  target = target.replace(/^https?:\/\//i, '');  // 兼容完整 URL（https://bing.com），双斜杠原样保留、不归一
+  target = target.replace(/^\/+/, '');            // 去前导斜杠
+  // 兼容完整 URL：Vercel 边缘会把 // 308 成 /，所以 https:// 和 https:/ 都要认
+  target = target.replace(/^https?:\/{1,2}/i, '');
   if (!target) return res.status(400).send('usage: /proxy/<token>/<host>/<path>');
 
   const host = target.split('/')[0];
