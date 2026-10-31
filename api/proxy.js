@@ -1,7 +1,11 @@
-// Vercel Serverless Function：通用代理（黑名单版 + 路径鉴权）
+// Vercel Serverless Function：通用代理（黑名单 + 路径鉴权 + HTML/CSS 重写）
 // 用法：https://<域名>/proxy/<token>/<目标>?<query>
 // 目标可以是「域名/路径」（img.blacknet.cc.cd/pole.jpg），
-// 也可以是完整 URL（https://bing.com）——带不带协议头都行，双斜杠原样透传、不归一。
+// 也可以是完整 URL（https://bing.com/search?q=x）——带不带协议头都行。
+//
+// HTML/CSS 重写：对 text/html、text/css 响应把里面的 URL 改写成代理地址，
+// 并注入 <base> 兜底相对路径，实现整页浏览（资源也走代理）。
+// 局限：JS 动态构造的 URL、Cookie 登录态不处理。
 //
 // 鉴权：令牌写在路径里（第一段），必须与 PROXY_TOKEN 一致，默认 chengxidaxia。
 // 访问控制：黑名单模式。PROXY_DENY 为逗号分隔的域名黑名单，默认空 = 不拦截任何域名。
@@ -12,23 +16,23 @@
 //   PROXY_DENY   黑名单域名，逗号分隔，默认空
 //   PROXY_ALLOW  可选白名单域名，逗号分隔；设置后仅放行这些域（覆盖黑名单）
 
+import { Readable } from 'node:stream';
+
 const DEFAULT_TOKEN = 'chengxidaxia';
 const DEFAULT_DENY = '';   // 默认空黑名单
 const DEFAULT_ALLOW = '';  // 默认空 = 走黑名单模式
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari/537.36';
 
-import { Readable } from 'node:stream';
-
 export default async function handler(req, res) {
   const token = process.env.PROXY_TOKEN || DEFAULT_TOKEN;
   const deny = (process.env.PROXY_DENY || DEFAULT_DENY).split(',').map(s => s.trim()).filter(Boolean);
   const allow = (process.env.PROXY_ALLOW || DEFAULT_ALLOW).split(',').map(s => s.trim()).filter(Boolean);
 
-  // Vercel 把 /proxy/xxx/yyy 映射到本函数：path 参数在 query 里（rewrite 见 vercel.json）
-  // 注意：单段时 req.query.path 是字符串，多段才是数组
+  // Vercel 把 /proxy/xxx 映射到本函数：path 参数在 query 里（rewrite 见 vercel.json）
   const rawPath = req.query.path || '';
   const rest = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath);
+
   // 结构：<token>/<目标>；保留空段，以识别完整 URL 里的 https://
   const segs = rest.split('/');
   const provided = segs.shift();
@@ -44,6 +48,32 @@ export default async function handler(req, res) {
   if (allow.length && !allow.includes(host)) return res.status(403).send('host not allowed: ' + host);
   if (deny.includes(host)) return res.status(403).send('host denied: ' + host);
 
+  const PREFIX = '/proxy/' + token + '/';
+  const pageUrl = 'https://' + target;            // 当前页面真实 URL（用于解析相对路径）
+
+  // 把任意 URL 包成代理路径；http(s) 以外（data:/javascript:/# 等）原样返回
+  // 写成单斜杠形式 https:/host/...，省掉 Vercel 对 // 的 308 往返
+  const wrap = (u) => {
+    try {
+      const t = String(u).trim();
+      if (!t || /^[#]/.test(t) || /^(javascript|data|mailto|tel|blob|about|ws|wss):/i.test(t)) return u;
+      if (t.startsWith(PREFIX)) return u;         // 已是代理地址
+      const abs = new URL(t, pageUrl).href;
+      if (!/^https?:/i.test(abs)) return u;
+      return PREFIX + abs.replace(/^https?:\/\//i, 'https:/');
+    } catch { return u; }
+  };
+
+  const CSS_URL = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+  const rewriteCss = (css) => css
+    .replace(/@import\s+(["'])([^"']+)\1/gi, (m, q, u) => `@import ${q}${wrap(u)}${q}`)
+    .replace(CSS_URL, (m, q, u) => `url(${q}${wrap(u)}${q})`);
+  const rewriteSrcset = (v) => v.split(',').map(p => {
+    const parts = p.trim().split(/\s+/);
+    if (parts[0]) parts[0] = wrap(parts[0]);
+    return parts.join(' ');
+  }).join(', ');
+
   const final = 'https://' + target + (new URL(req.url, 'http://x').search || '');
   try {
     const headers = { 'User-Agent': UA };
@@ -55,20 +85,58 @@ export default async function handler(req, res) {
       method: req.method,
       headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : req,
+      redirect: 'manual',                          // 自己改写 Location，让跳转留在代理里
       signal: AbortSignal.timeout(55000),
     });
 
     res.statusCode = r.status;
-    // 注意：fetch 自动解压 gzip/br，content-length 是压缩前长度，与解压后的流不匹配 → 必须丢弃
-    // （否则浏览器按错误长度提前截断，页面只剩半个 head）。改用 chunked 传输，长度自动正确。
+    // fetch 自动解压 gzip/br，content-length 是压缩前长度，与解压后内容不匹配 → 必须丢弃
     for (const h of ['content-type', 'cache-control', 'etag', 'last-modified']) {
       const v = r.headers.get(h); if (v) res.setHeader(h, v);
     }
     res.removeHeader('content-length');
     res.setHeader('access-control-allow-origin', '*');
+
+    const ctype = (r.headers.get('content-type') || '').toLowerCase();
+    const isGet = req.method === 'GET';
+
+    // 3xx：把 Location 改写成代理地址（相对 Location 先解析成绝对）
+    const loc = r.headers.get('location');
+    if (loc) {
+      try {
+        const abs = new URL(loc, pageUrl).href;
+        if (/^https?:/i.test(abs)) res.setHeader('location', PREFIX + abs.replace(/^https?:\/\//i, 'https:/'));
+      } catch { /* 保持原样 */ }
+    }
+
     if (req.method === 'HEAD') return res.end();
+
+    // HTML：改写 URL + 注入 <base> 兜底
+    if (isGet && ctype.includes('text/html')) {
+      let html = await r.text();
+      html = html
+        .replace(/(\s(?:src|href|action|poster|formaction|data-src)\s*=\s*)(["'])([^"']+)\2/gi,
+          (m, a, q, u) => a + q + wrap(u) + q)
+        .replace(/(\ssrcset\s*=\s*)(["'])([^"']+)\2/gi,
+          (m, a, q, v) => a + q + rewriteSrcset(v) + q)
+        .replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi,
+          (m, o, css, c) => o + rewriteCss(css) + c);
+      const baseHref = PREFIX + 'https:/' + target + (target.includes('/') ? '' : '/');
+      html = /<head[^>]*>/i.test(html)
+        ? html.replace(/<head[^>]*>/i, m => m + `<base href="${baseHref}">`)
+        : `<base href="${baseHref}">` + html;
+      return res.end(html);
+    }
+
+    // CSS：改写 url() / @import
+    if (isGet && ctype.includes('text/css')) {
+      const css = rewriteCss(await r.text());
+      return res.end(css);
+    }
+
+    // 其余（图片/API/字体等）：流式转发
     if (r.body) {
-      Readable.fromWeb(r.body).pipe(res);   // 流式转发：首字节更快
+      Readable.fromWeb(r.body).pipe(res);
     } else {
       res.end(Buffer.from(await r.arrayBuffer()));
     }
