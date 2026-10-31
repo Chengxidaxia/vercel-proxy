@@ -132,6 +132,21 @@ export default async function handler(req, res) {
     const ctype = (r.headers.get('content-type') || '').toLowerCase();
     const isGet = req.method === 'GET';
 
+    // Cloudflare 盾页（质询）透过代理无法通过：IP 信誉校验 + JS 绑定原域名，只会死循环。
+    // 与其返回坏页面，不如给一句人话。
+    const cfMitigated = r.headers.get('cf-mitigated');
+    const cfBlocked = (r.status === 403 || r.status === 503) &&
+      /cloudflare/i.test(r.headers.get('server') || '') &&
+      (cfMitigated === 'challenge' || /cf-chl|just a moment/i.test(ctype));
+    if (cfBlocked && isGet) {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      return res.end('<!doctype html><meta charset="utf-8"><title>无法代理</title>' +
+        '<body style="font-family:system-ui;max-width:560px;margin:80px auto;line-height:1.7">' +
+        '<h2>⛔ 目标站受 Cloudflare 人机验证保护</h2>' +
+        '<p>该网站对数据中心 IP（Vercel 服务器）强制弹出质询页，且验证脚本绑定原域名，无法通过透明代理完成。</p>' +
+        '<p>请直接访问该网站，或换一个目标。<a href="javascript:history.back()">返回</a></p></body>');
+    }
+
     // 3xx：把 Location 改写成代理地址（相对 Location 先解析成绝对）
     const loc = r.headers.get('location');
     if (loc) {
