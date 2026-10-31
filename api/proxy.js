@@ -164,6 +164,8 @@ export default async function handler(req, res) {
         'if(/^(data|blob|javascript|mailto|about|tel|ws|wss):/i.test(u))return u;' +
         'if(/^https?:\\/\\//i.test(u))return P+u;' +
         'if(/^\\/\\//.test(u))return P+"https:"+u;' +
+        // 域名被当成相对路径（如 JS 拼出 "discord.com/api/x" 或 "/discord.com/api/x"）→ 还原成绝对
+        'if(u===H||u.indexOf(H+"/")===0||u.indexOf("/"+H+"/")===0)return P+"https://"+u.replace(/^\\//,"");' +
         'if(/^\\/[^\\/]/.test(u))return P+"https://"+H+u;' +
         'return u}catch(e){return u}}' +
         'var of=window.fetch;' +
@@ -181,7 +183,8 @@ export default async function handler(req, res) {
         // MutationObserver：JS 动态插入的 a/link/img/script/iframe 节点也改写（如移动端导航按钮）
         'function fixEl(el){try{var a=el.tagName==="A"||el.tagName==="LINK"?"href":"src";var v=el.getAttribute&&el.getAttribute(a);if(v){var f=fix(v);if(f!==v)el.setAttribute(a,f)}}catch(e){}}' +
         'var SEL="a[href],link[href],img[src],script[src],iframe[src],source[src],video[src],audio[src]";' +
-        'if(window.MutationObserver){new MutationObserver(function(ms){for(var i=0;i<ms.length;i++){var ns=ms[i].addedNodes||[];for(var j=0;j<ns.length;j++){var n=ns[j];if(n.nodeType!==1)continue;if(n.matches&&n.matches(SEL))fixEl(n);if(n.querySelectorAll)n.querySelectorAll(SEL).forEach(fixEl)}}}).observe(document.documentElement||document,{childList:true,subtree:true})}' +
+        'function fixAttr(m){if(m.type==="attributes"){fixEl(m.target)}else{var ns=m.addedNodes||[];for(var j=0;j<ns.length;j++){var n=ns[j];if(n.nodeType!==1)continue;if(n.matches&&n.matches(SEL))fixEl(n);if(n.querySelectorAll)n.querySelectorAll(SEL).forEach(fixEl)}}}' +
+        'if(window.MutationObserver){new MutationObserver(function(ms){for(var i=0;i<ms.length;i++)fixAttr(ms[i])}).observe(document.documentElement||document,{childList:true,subtree:true,attributes:true,attributeFilter:["href","src"]})}' +
         '})();<\/script>';
       const head = hook + `<base href="${baseHref}">`;
       html = /<head[^>]*>/i.test(html)
