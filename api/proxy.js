@@ -170,6 +170,14 @@ export default async function handler(req, res) {
         'window.fetch=function(i,o){try{if(typeof i==="string")i=fix(i);else if(i&&i.url)i=new Request(fix(i.url),i)}catch(e){}return of.call(window,i,o)};' +
         'var oo=XMLHttpRequest.prototype.open;' +
         'XMLHttpRequest.prototype.open=function(){try{if(typeof arguments[1]==="string")arguments[1]=fix(arguments[1])}catch(e){}return oo.apply(this,arguments)};' +
+        // window.open / location.assign/replace：JS 动态导航也进代理
+        'var ow=window.open;' +
+        'window.open=function(u){try{if(typeof u==="string")u=fix(u)}catch(e){}return ow.apply(window,arguments)};' +
+        'try{var la=location.assign.bind(location),lr=location.replace.bind(location);' +
+        'location.assign=function(u){try{u=fix(u)}catch(e){}return la(u)};' +
+        'location.replace=function(u){try{u=fix(u)}catch(e){}return lr(u)}}catch(e){}' +
+        // 兜底：href="#" 且带 data-track-download 的按钮（JS 里用 location.href= 跳安装包，无法拦截）→ 引导到下载页
+        'document.addEventListener("click",function(e){try{var a=e.target&&e.target.closest?e.target.closest("a[href=\\"#\\"][data-track-download]"):null;if(!a)return;e.preventDefault();location.href=fix("https://"+H+"/download")}catch(e){}},true);' +
         // MutationObserver：JS 动态插入的 a/link/img/script/iframe 节点也改写（如移动端导航按钮）
         'function fixEl(el){try{var a=el.tagName==="A"||el.tagName==="LINK"?"href":"src";var v=el.getAttribute&&el.getAttribute(a);if(v){var f=fix(v);if(f!==v)el.setAttribute(a,f)}}catch(e){}}' +
         'var SEL="a[href],link[href],img[src],script[src],iframe[src],source[src],video[src],audio[src]";' +
