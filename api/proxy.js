@@ -19,25 +19,24 @@
 import { Readable } from 'node:stream';
 import { get as edgeGet } from '@vercel/edge-config';
 
-const DEFAULT_TOKEN = 'chengxidaxia';
-const DEFAULT_DENY = '';   // 默认空黑名单
-const DEFAULT_ALLOW = '';  // 默认空 = 走黑名单模式
+// 无硬编码默认 token：token 列表来自 Edge Config（推荐）或环境变量，都没有则全部 401。
+// Edge Config 内容：{ "tokens": ["a","b"], "deny": ["x.com"], "allow": [] }
+const DEFAULT_DENY = '';   // 黑名单回退
+const DEFAULT_ALLOW = '';  // 白名单回退，默认空 = 走黑名单模式
 
 // 运行时动态配置（Vercel Edge Config，面板 JSON 编辑器直接改，秒级生效无需部署）
-// Edge Config 内容：{ "token": "...", "deny": ["a.com","b.com"], "allow": [] }
-// 未创建 / 读取失败 / 字段缺失 → 回退 env → 回退默认值
-let _cfg = { t: 0, token: null, deny: null, allow: null };
+let _cfg = { t: 0, tokens: null, deny: null, allow: null };
 async function loadEdgeConfig() {
   if (!process.env.EDGE_CONFIG) return _cfg;
   const now = Date.now();
   if (now - _cfg.t < 10000) return _cfg;          // 10s 内存缓存（面板改完最多 10s 生效）
   try {
-    const [token, deny, allow] = await Promise.all([
-      edgeGet('token'), edgeGet('deny'), edgeGet('allow'),
+    const [tokens, deny, allow] = await Promise.all([
+      edgeGet('tokens'), edgeGet('deny'), edgeGet('allow'),
     ]);
     _cfg = {
       t: now,
-      token: typeof token === 'string' && token ? token : _cfg.token,
+      tokens: Array.isArray(tokens) ? tokens.map(String).filter(Boolean) : _cfg.tokens,
       deny: Array.isArray(deny) ? deny.map(String) : _cfg.deny,
       allow: Array.isArray(allow) ? allow.map(String) : _cfg.allow,
     };
@@ -49,7 +48,9 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari/537.36';
 
 export default async function handler(req, res) {
   const ec = await loadEdgeConfig();
-  const token = (ec && ec.token) || process.env.PROXY_TOKEN || DEFAULT_TOKEN;
+  // token 列表：Edge Config > env PROXY_TOKENS(逗号分隔) > 空列表(全部拒绝，无默认 token)
+  const tokens = (ec && ec.tokens) ||
+    (process.env.PROXY_TOKENS || '').split(',').map(s => s.trim()).filter(Boolean);
   const deny = (ec && ec.deny) ||
     (process.env.PROXY_DENY || DEFAULT_DENY).split(',').map(s => s.trim()).filter(Boolean);
   const allow = (ec && ec.allow) ||
@@ -62,7 +63,7 @@ export default async function handler(req, res) {
   // 结构：<token>/<目标>；保留空段，以识别完整 URL 里的 https://
   const segs = rest.split('/');
   const provided = segs.shift();
-  if (provided !== token) return res.status(401).send('invalid token');
+  if (!tokens.includes(provided)) return res.status(401).send('invalid token');
 
   let target = segs.join('/');
   target = target.replace(/^\/+/, '');            // 去前导斜杠
@@ -74,7 +75,7 @@ export default async function handler(req, res) {
   if (allow.length && !allow.includes(host)) return res.status(403).send('host not allowed: ' + host);
   if (deny.includes(host)) return res.status(403).send('host denied: ' + host);
 
-  const PREFIX = '/proxy/' + token + '/';
+  const PREFIX = '/proxy/' + provided + '/';
   const pageUrl = 'https://' + target;            // 当前页面真实 URL（用于解析相对路径）
 
   // 把任意 URL 包成代理路径；http(s) 以外（data:/javascript:/# 等）原样返回

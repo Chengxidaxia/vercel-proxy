@@ -1,34 +1,47 @@
-# vercel-proxy — 通用代理（黑名单 + 路径鉴权）
+# vercel-proxy — 通用代理（token 列表 + 黑名单 + HTML 重写）
 
-部署在 Vercel（git push 自动上线，无额度焦虑）。
+部署在 Vercel（git push 自动上线）。HTML/CSS 重写 + fetch/XHR 钩子，支持整页代理浏览。
 
 ## 用法
 
 ```
-https://<你的vercel域名>/proxy/<token>/<host>/<path>?<query>
-例：https://xxx.vercel.app/proxy/chengxidaxia/img.blacknet.cc.cd/pole.jpg
+https://<域名>/proxy/<token>/<目标>?<query>
+目标可以是完整 URL（https://bing.com/search?q=x）或纯域名路径（img.blacknet.cc.cd/pole.jpg）
 ```
 
-- `<token>`：路径第一段，鉴权口令，默认 `chengxidaxia`
-- `<host>`：目标域名（第二段）
-- `<path>`：目标路径（其余段）
+## token 管理（Edge Config，实时生效无需部署）
 
-## 访问控制
+token 是**列表**，命中任一即通过；**没有硬编码默认值**——列表为空则全部 401。
 
-- **黑名单模式（默认）**：`PROXY_DENY` 为空时，除显式拉黑的域名外全部放行。
-- **白名单模式（可选）**：设置 `PROXY_ALLOW` 后，仅放行列表内的域名（覆盖黑名单）。
+配置位置：Vercel 面板 → 项目 → **Storage → Global Config (Edge Config)** → 连接到本项目 → 编辑 JSON：
 
-## 环境变量（Vercel 面板 → Settings → Environment Variables）
+```json
+{
+  "tokens": ["chengxidaxia", "另一个token"],
+  "deny": [],
+  "allow": []
+}
+```
 
-| 变量 | 说明 | 默认 |
+保存后秒级生效（函数内 10s 缓存，最多延迟 10 秒）。
+
+| 字段 | 说明 | 空值行为 |
 |---|---|---|
-| `PROXY_TOKEN` | 路径里的鉴权口令 | `chengxidaxia` |
-| `PROXY_DENY` | 逗号分隔的黑名单域名 | 空（不拦截） |
-| `PROXY_ALLOW` | 逗号分隔的白名单域名；设置后仅放行这些域 | 空（走黑名单） |
+| `tokens` | 可用口令列表 | 无任何 token（env 也没有）→ 全部 401 |
+| `deny` | 黑名单域名 | 不拦截任何域 |
+| `allow` | 白名单域名；设了就只放行列表内 | 走黑名单模式 |
+
+## 环境变量回退（Edge Config 缺失/缺字段时）
+
+| 变量 | 说明 |
+|---|---|
+| `PROXY_TOKENS` | 逗号分隔的 token 列表 |
+| `PROXY_DENY` | 逗号分隔的黑名单 |
+| `PROXY_ALLOW` | 逗号分隔的白名单 |
 
 ## 本地测试
 
 ```
 npx -y vercel dev
-curl "http://localhost:3000/proxy/chengxidaxia/api.github.com/zen"
+curl "http://localhost:3000/proxy/<token>/api.github.com/zen"
 ```
