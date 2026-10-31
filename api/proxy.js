@@ -52,7 +52,7 @@ export default async function handler(req, res) {
   const pageUrl = 'https://' + target;            // 当前页面真实 URL（用于解析相对路径）
 
   // 把任意 URL 包成代理路径；http(s) 以外（data:/javascript:/# 等）原样返回
-  // 写成单斜杠形式 https:/host/...，省掉 Vercel 对 // 的 308 往返
+  // 保留自然 https:// 双斜杠形式（Vercel 会 308 成单斜杠，浏览器自动跟随，函数两种都认）
   const wrap = (u) => {
     try {
       const t = String(u).trim();
@@ -60,7 +60,7 @@ export default async function handler(req, res) {
       if (t.startsWith(PREFIX)) return u;         // 已是代理地址
       const abs = new URL(t, pageUrl).href;
       if (!/^https?:/i.test(abs)) return u;
-      return PREFIX + abs.replace(/^https?:\/\//i, 'https:/');
+      return PREFIX + abs;
     } catch { return u; }
   };
 
@@ -74,7 +74,12 @@ export default async function handler(req, res) {
     return parts.join(' ');
   }).join(', ');
 
-  const final = 'https://' + target + (new URL(req.url, 'http://x').search || '');
+  // 客户端 query：剔除 rewrite 注入的内部参数 path，其余原样转发给目标
+  const u0 = new URL(req.url, 'http://x');
+  const q0 = new URLSearchParams(u0.search);
+  q0.delete('path');
+  const qs = q0.toString();
+  const final = 'https://' + target + (qs ? '?' + qs : '');
   try {
     const headers = { 'User-Agent': UA };
     const auth = req.headers.authorization;
@@ -105,7 +110,7 @@ export default async function handler(req, res) {
     if (loc) {
       try {
         const abs = new URL(loc, pageUrl).href;
-        if (/^https?:/i.test(abs)) res.setHeader('location', PREFIX + abs.replace(/^https?:\/\//i, 'https:/'));
+        if (/^https?:/i.test(abs)) res.setHeader('location', PREFIX + abs);
       } catch { /* 保持原样 */ }
     }
 
@@ -121,7 +126,7 @@ export default async function handler(req, res) {
           (m, a, q, v) => a + q + rewriteSrcset(v) + q)
         .replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi,
           (m, o, css, c) => o + rewriteCss(css) + c);
-      const baseHref = PREFIX + 'https:/' + target + (target.includes('/') ? '' : '/');
+      const baseHref = PREFIX + pageUrl + (target.includes('/') ? '' : '/');
       html = /<head[^>]*>/i.test(html)
         ? html.replace(/<head[^>]*>/i, m => m + `<base href="${baseHref}">`)
         : `<base href="${baseHref}">` + html;
