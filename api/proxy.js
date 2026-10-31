@@ -59,9 +59,12 @@ export default async function handler(req, res) {
     });
 
     res.statusCode = r.status;
-    for (const h of ['content-type', 'content-length', 'cache-control', 'etag', 'last-modified']) {
+    // 注意：fetch 自动解压 gzip/br，content-length 是压缩前长度，与解压后的流不匹配 → 必须丢弃
+    // （否则浏览器按错误长度提前截断，页面只剩半个 head）。改用 chunked 传输，长度自动正确。
+    for (const h of ['content-type', 'cache-control', 'etag', 'last-modified']) {
       const v = r.headers.get(h); if (v) res.setHeader(h, v);
     }
+    res.removeHeader('content-length');
     res.setHeader('access-control-allow-origin', '*');
     if (req.method === 'HEAD') return res.end();
     if (r.body) {
