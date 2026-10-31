@@ -19,7 +19,9 @@ export default async function handler(req, res) {
   }
 
   // Vercel 把 /proxy/xxx/yyy 映射到本函数：path 参数在 query 里（rewrite 方式见 vercel.json）
-  const rest = (req.query.path || []).join('/');
+  // 注意：单段时是字符串，多段才是数组
+  const rawPath = req.query.path || '';
+  const rest = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath);
   if (!rest) return res.status(400).send('usage: /proxy/<host>/<path>');
   const host = rest.split('/')[0];
   if (!allow.includes(host)) return res.status(403).send('host not allowed: ' + host);
