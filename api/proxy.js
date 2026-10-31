@@ -1,6 +1,7 @@
 // Vercel Serverless Function：通用代理（黑名单版 + 路径鉴权）
-// 用法：https://<域名>/proxy/<token>/<host>/<path>?<query>
-// 例：  https://xxx.vercel.app/proxy/chengxidaxia/img.blacknet.cc.cd/pole.jpg
+// 用法：https://<域名>/proxy/<token>/<目标>?<query>
+// 目标可以是「域名/路径」（img.blacknet.cc.cd/pole.jpg），
+// 也可以是完整 URL（https://bing.com）——带不带协议头都行，双斜杠原样透传、不归一。
 //
 // 鉴权：令牌写在路径里（第一段），必须与 PROXY_TOKEN 一致，默认 chengxidaxia。
 // 访问控制：黑名单模式。PROXY_DENY 为逗号分隔的域名黑名单，默认空 = 不拦截任何域名。
@@ -17,6 +18,8 @@ const DEFAULT_ALLOW = '';  // 默认空 = 走黑名单模式
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari/537.36';
 
+import { Readable } from 'node:stream';
+
 export default async function handler(req, res) {
   const token = process.env.PROXY_TOKEN || DEFAULT_TOKEN;
   const deny = (process.env.PROXY_DENY || DEFAULT_DENY).split(',').map(s => s.trim()).filter(Boolean);
@@ -26,25 +29,28 @@ export default async function handler(req, res) {
   // 注意：单段时 req.query.path 是字符串，多段才是数组
   const rawPath = req.query.path || '';
   const rest = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath);
-  // 结构：<token>/<host>/<path...>
-  const segs = rest.split('/').filter(Boolean);
-  if (segs.length < 2) return res.status(400).send('usage: /proxy/<token>/<host>/<path>');
-
+  // 结构：<token>/<目标>；保留空段，以识别完整 URL 里的 https://
+  const segs = rest.split('/');
   const provided = segs.shift();
   if (provided !== token) return res.status(401).send('invalid token');
 
-  const host = segs[0];
+  let target = segs.join('/');
+  target = target.replace(/^\/+/, '');           // 去前导斜杠
+  target = target.replace(/^https?:\/\//i, '');  // 兼容完整 URL（https://bing.com），双斜杠原样保留、不归一
+  if (!target) return res.status(400).send('usage: /proxy/<token>/<host>/<path>');
+
+  const host = target.split('/')[0];
   if (allow.length && !allow.includes(host)) return res.status(403).send('host not allowed: ' + host);
   if (deny.includes(host)) return res.status(403).send('host denied: ' + host);
 
-  const target = 'https://' + segs.join('/') + (new URL(req.url, 'http://x').search || '');
+  const final = 'https://' + target + (new URL(req.url, 'http://x').search || '');
   try {
     const headers = { 'User-Agent': UA };
     const auth = req.headers.authorization;
     if (auth) headers['Authorization'] = auth;
     if (req.headers['content-type']) headers['Content-Type'] = req.headers['content-type'];
 
-    const r = await fetch(target, {
+    const r = await fetch(final, {
       method: req.method,
       headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : req,
@@ -57,8 +63,11 @@ export default async function handler(req, res) {
     }
     res.setHeader('access-control-allow-origin', '*');
     if (req.method === 'HEAD') return res.end();
-    const buf = Buffer.from(await r.arrayBuffer());
-    res.end(buf);
+    if (r.body) {
+      Readable.fromWeb(r.body).pipe(res);   // 流式转发：首字节更快
+    } else {
+      res.end(Buffer.from(await r.arrayBuffer()));
+    }
   } catch (e) {
     res.statusCode = 502;
     res.end('proxy error: ' + e.message);
