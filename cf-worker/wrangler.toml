@@ -1,0 +1,10 @@
+name = "cf-proxy"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# 变量也可在 CF 面板改（Workers → Settings → Variables），面板改动即时生效无需部署。
+# TOKENS 必填：逗号分隔，例如
+# [vars]
+# TOKENS = "chengxidaxia"
+# PROXY_DENY = ""
+# PROXY_ALLOW = ""
