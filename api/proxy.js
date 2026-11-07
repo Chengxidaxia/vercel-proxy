@@ -1,44 +1,56 @@
 // Vercel Serverless Function：通用代理（黑名单 + 路径鉴权 + HTML/CSS 重写）
-// 用法：https://<域名>/proxy/<token>/<目标>?<query>
-// 目标可以是「域名/路径」（img.blacknet.cc.cd/pole.jpg），
-// 也可以是完整 URL（https://bing.com/search?q=x）——带不带协议头都行。
 //
-// HTML/CSS 重写：对 text/html、text/css 响应把里面的 URL 改写成代理地址，
-// 并注入 <base> 兜底相对路径，实现整页浏览（资源也走代理）。
-// 局限：JS 动态构造的 URL、Cookie 登录态不处理。
+// 两种工作模式，由 Edge Config（Global Config）里的 `domain` 一键切换：
 //
-// 鉴权：令牌写在路径里（第一段），必须与 PROXY_TOKEN 一致，默认 chengxidaxia。
-// 访问控制：黑名单模式。PROXY_DENY 为逗号分隔的域名黑名单，默认空 = 不拦截任何域名。
-//   （仍可用 PROXY_ALLOW 设为白名单模式：一旦设置，则只放行列表内的域。）
+//   1) 站点镜像模式（domain 非空）
+//      proxy 域名整站当成 domain 那个站来用：任意路径 /a/b?x=1 → <domain>/a/b?x=1，
+//      响应原样透传（不重写 HTML/CSS，因为同源后相对路径本来就正确），
+//      只改写 Location 与 Set-Cookie 的域，让跳转和登录态留在 proxy 域名上。
+//      **此模式下 tokens / deny / allow 三项全部忽略。**
 //
-// 环境变量（Vercel 面板 → Settings → Environment Variables）：
-//   PROXY_TOKEN  路径鉴权口令，默认 chengxidaxia
-//   PROXY_DENY   黑名单域名，逗号分隔，默认空
-//   PROXY_ALLOW  可选白名单域名，逗号分隔；设置后仅放行这些域（覆盖黑名单）
+//   2) 口令代理模式（domain 为空）
+//      https://<域名>/proxy/<token>/<目标>?<query>
+//      目标可以是「域名/路径」（img.blacknet.cc.cd/pole.jpg），
+//      也可以是完整 URL（https://bing.com/search?q=x）——带不带协议头都行。
+//      HTML/CSS 重写：对 text/html、text/css 响应把里面的 URL 改写成代理地址，
+//      并注入 <base> 兜底相对路径，实现整页浏览（资源也走代理）。
+//
+// Edge Config 内容（Vercel 面板 → Storage → Global Config → 编辑 JSON）：
+//   { "domain": "", "tokens": ["a","b"], "deny": [], "allow": [] }
+//
+// 环境变量回退（Edge Config 缺失/缺字段时）：
+//   PROXY_DOMAIN 站点根链接，如 https://example.com（带不带协议都行）；为空则走口令模式
+//   PROXY_TOKENS 逗号分隔 token 列表
+//   PROXY_DENY   逗号分隔黑名单
+//   PROXY_ALLOW  逗号分隔白名单
 
 import { Readable } from 'node:stream';
 import { get as edgeGet } from '@vercel/edge-config';
 
-// 无硬编码默认 token：token 列表来自 Edge Config（推荐）或环境变量，都没有则全部 401。
-// Edge Config 内容：{ "tokens": ["a","b"], "deny": ["x.com"], "allow": [] }
 const DEFAULT_DENY = '';   // 黑名单回退
 const DEFAULT_ALLOW = '';  // 白名单回退，默认空 = 走黑名单模式
 
-// 运行时动态配置（Vercel Edge Config，面板 JSON 编辑器直接改，秒级生效无需部署）
-let _cfg = { t: 0, tokens: null, deny: null, allow: null };
+// 运行时动态配置（Edge Config，面板 JSON 编辑器直接改，秒级生效无需部署）
+let _cfg = { t: 0, tokens: null, deny: null, allow: null, domain: null };
 async function loadEdgeConfig() {
-  if (!process.env.EDGE_CONFIG) return _cfg;
   const now = Date.now();
+  const envDomain = process.env.PROXY_DOMAIN;
+  // 没接 Edge Config 时只走环境变量：环境变量读取成本极低，不做缓存，改完立即生效
+  if (!process.env.EDGE_CONFIG) {
+    _cfg = { t: now, tokens: _cfg.tokens, deny: _cfg.deny, allow: _cfg.allow, domain: envDomain || null };
+    return _cfg;
+  }
   if (now - _cfg.t < 10000) return _cfg;          // 10s 内存缓存（面板改完最多 10s 生效）
   try {
-    const [tokens, deny, allow] = await Promise.all([
-      edgeGet('tokens'), edgeGet('deny'), edgeGet('allow'),
+    const [tokens, deny, allow, domain] = await Promise.all([
+      edgeGet('tokens'), edgeGet('deny'), edgeGet('allow'), edgeGet('domain'),
     ]);
     _cfg = {
       t: now,
       tokens: Array.isArray(tokens) ? tokens.map(String).filter(Boolean) : _cfg.tokens,
       deny: Array.isArray(deny) ? deny.map(String) : _cfg.deny,
       allow: Array.isArray(allow) ? allow.map(String) : _cfg.allow,
+      domain: typeof domain === 'string' ? domain : (domain == null ? _cfg.domain : String(domain)),
     };
   } catch { _cfg.t = now; }                        // 读失败沿用缓存值
   return _cfg;
@@ -46,19 +58,128 @@ async function loadEdgeConfig() {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126 Safari/537.36';
 
+// 站点根链接归一化：补协议、去尾部斜杠、保留子路径（https://a.com/base）
+function normBase(v) {
+  if (!v) return '';
+  let s = String(v).trim();
+  if (!s) return '';
+  if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+  try {
+    const u = new URL(s);
+    if (!/^https?:$/.test(u.protocol)) return '';
+    const base = u.origin + u.pathname.replace(/\/+$/, '');
+    return base.replace(/^https?:\/\/[^/]+$/, u.origin);   // 根路径就只留 origin
+  } catch { return ''; }
+}
+
+// 客户端 query（剔除 rewrite 注入的内部参数 path）
+function clientQuery(req) {
+  const u0 = new URL(req.url, 'http://x');
+  const q0 = new URLSearchParams(u0.search);
+  q0.delete('path');
+  return q0.toString();
+}
+
+const HOP_REQ = /^(host|connection|keep-alive|proxy-authenticate|proxy-authorization|te|trailer|transfer-encoding|upgrade|accept-encoding|content-length)$/i;
+const HOP_RES = /^(connection|keep-alive|proxy-authenticate|proxy-authorization|te|trailer|transfer-encoding|upgrade|content-encoding|content-length|set-cookie|location)$/i;
+
+// 站点镜像：整站透传。请求 /x/y → <domain>/x/y，响应不重写，
+// 只把 Location / Set-Cookie 的域换成 proxy 域，保证跳转与登录态不外逃。
+async function serveMirror(req, res, subPath, base) {
+  const qs = clientQuery(req);
+  const sub = subPath ? '/' + subPath.replace(/^\/+/, '') : '/';
+  const target = base + sub + (qs ? '?' + qs : '');
+
+  const headers = {};
+  for (const [k, v] of Object.entries(req.headers || {})) {
+    if (HOP_REQ.test(k)) continue;
+    headers[k] = Array.isArray(v) ? v.join(', ') : v;
+  }
+  if (!headers['user-agent']) headers['user-agent'] = UA;
+
+  let r;
+  try {
+    r = await fetch(target, {
+      method: req.method,
+      headers,
+      body: ['GET', 'HEAD'].includes(req.method) ? undefined : req,
+      redirect: 'manual',                       // 自己改 Location，让跳转留在镜像域里
+      signal: AbortSignal.timeout(55000),
+    });
+  } catch (e) {
+    res.statusCode = 502;
+    res.setHeader('content-type', 'text/plain; charset=utf-8');
+    return res.end('proxy error: ' + e.message);
+  }
+
+  res.statusCode = r.status;
+  for (const [k, v] of r.headers) {
+    if (HOP_RES.test(k)) continue;
+    res.setHeader(k, v);
+  }
+  res.removeHeader('content-length');
+
+  const proxyHost = req.headers['x-forwarded-host'] || req.headers.host || '';
+  const baseHost = (() => { try { return new URL(base).host; } catch { return ''; } })();
+  const sameHost = (h) => {
+    const x = String(h || '').toLowerCase().replace(/:\d+$/, '');
+    return !!baseHost && x === baseHost.toLowerCase().replace(/:\d+$/, '');
+  };
+
+  // 3xx：目标站把绝对地址跳到自己的域 → 换成镜像域，否则用户会被弹回原站
+  const loc = r.headers.get('location');
+  if (loc && proxyHost) {
+    try {
+      const abs = new URL(loc, target);
+      if (sameHost(abs.host)) abs.host = proxyHost;
+      abs.protocol = 'https:';                 // 镜像域只走 https
+      res.setHeader('location', abs.href);
+    } catch { /* 保持原样 */ }
+  } else if (loc) {
+    res.setHeader('location', loc);
+  }
+
+  // Set-Cookie：去掉 Domain= 让它绑定到镜像域；不改 Path（与原站语义一致）
+  const cookies = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : [];
+  if (cookies.length) {
+    res.setHeader('set-cookie', cookies.map((c) => c.replace(/;\s*domain=[^;]*/gi, '')));
+  }
+
+  if (req.method === 'HEAD' || r.status === 204 || r.status === 304) return res.end();
+  if (r.body) Readable.fromWeb(r.body).pipe(res);
+  else res.end(Buffer.from(await r.arrayBuffer()));
+}
+
 export default async function handler(req, res) {
   const ec = await loadEdgeConfig();
-  // token 列表：Edge Config > env PROXY_TOKENS(逗号分隔) > 空列表(全部拒绝，无默认 token)
   const tokens = (ec && ec.tokens) ||
     (process.env.PROXY_TOKENS || '').split(',').map(s => s.trim()).filter(Boolean);
   const deny = (ec && ec.deny) ||
     (process.env.PROXY_DENY || DEFAULT_DENY).split(',').map(s => s.trim()).filter(Boolean);
   const allow = (ec && ec.allow) ||
     (process.env.PROXY_ALLOW || DEFAULT_ALLOW).split(',').map(s => s.trim()).filter(Boolean);
+  const domain = normBase((ec && ec.domain) || process.env.PROXY_DOMAIN);
 
-  // Vercel 把 /proxy/xxx 映射到本函数：path 参数在 query 里（rewrite 见 vercel.json）
+  // Vercel 把任意路径 rewrite 到本函数：path 参数在 query 里（见 vercel.json）
   const rawPath = req.query.path || '';
-  const rest = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath);
+  let rest = Array.isArray(rawPath) ? rawPath.join('/') : String(rawPath);
+  rest = rest.replace(/^\/+/, '');
+  // 兜底：直接命中函数自身（rewrite 目标），当成根路径处理，避免自我循环
+  if (/^api\/proxy(\/|$)/i.test(rest) && !domain) rest = '';
+
+  // ---------- 模式一：站点镜像（domain 非空 → 忽略 tokens/deny/allow） ----------
+  if (domain) {
+    return serveMirror(req, res, rest, domain);
+  }
+
+  // ---------- 模式二：口令代理 ----------
+  if (!/^proxy(\/|$)/i.test(rest)) {
+    res.statusCode = 404;
+    res.setHeader('content-type', 'text/plain; charset=utf-8');
+    return res.end('usage: /proxy/<token>/<target>\n' +
+      '（若想让本域名整站镜像某个站点，请在 Global Config 里把 "domain" 填成站点根链接）');
+  }
+  rest = rest.slice('proxy'.length).replace(/^\/+/, '');
 
   // 结构：<token>/<目标>；保留空段，以识别完整 URL 里的 https://
   const segs = rest.split('/');
@@ -101,11 +222,7 @@ export default async function handler(req, res) {
     return parts.join(' ');
   }).join(', ');
 
-  // 客户端 query：剔除 rewrite 注入的内部参数 path，其余原样转发给目标
-  const u0 = new URL(req.url, 'http://x');
-  const q0 = new URLSearchParams(u0.search);
-  q0.delete('path');
-  const qs = q0.toString();
+  const qs = clientQuery(req);
   const final = 'https://' + target + (qs ? '?' + qs : '');
   try {
     const headers = { 'User-Agent': UA };

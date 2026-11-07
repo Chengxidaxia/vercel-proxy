@@ -1,6 +1,7 @@
 {
   "trailingSlash": false,
   "rewrites": [
-    { "source": "/proxy/:path*", "destination": "/api/proxy?path=:path*" }
+    { "source": "/proxy/:path*", "destination": "/api/proxy?path=proxy/:path*" },
+    { "source": "/((?!api(?:/|$)).*)", "destination": "/api/proxy?path=$1" }
   ]
 }
